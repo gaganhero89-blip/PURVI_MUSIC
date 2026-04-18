@@ -1,16 +1,26 @@
-FROM nikolaik/python-nodejs:python3.11-nodejs19
+FROM python:3.11-slim-bookworm
 
-RUN sed -i 's|http://deb.debian.org/debian|http://archive.debian.org/debian|g' /etc/apt/sources.list && \
-    sed -i '/security.debian.org/d' /etc/apt/sources.list && \
+# Set working directory
+WORKDIR /app
+
+# Fix sources.list for stable apt + install deps without repo issues
+RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian-security bookworm-security main" >> /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian bookworm-updates main" >> /etc/apt/sources.list && \
     apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg aria2 && \
-    apt-get clean && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        aria2 \
+        curl \
+        && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-COPY . /app/
-WORKDIR /app/
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN python -m pip install --no-cache-dir --upgrade pip
-RUN pip3 install --no-cache-dir --upgrade --requirement requirements.txt
+# Copy bot code
+COPY . .
 
-CMD bash start
+# Run bot (no web server needed for polling)
+CMD ["python3", "main.py"]
