@@ -1,62 +1,134 @@
 import asyncio
 import importlib
+import os
+import sys
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from pyrogram import idle
-from pytgcalls.exceptions import NoActiveGroupCall
 
-import config
-from PURVIMUSIC import LOGGER, app, userbot
-from PURVIMUSIC.core.call import PURVI
-from PURVIMUSIC.misc import sudo
-from PURVIMUSIC.plugins import ALL_MODULES
-from PURVIMUSIC.utils.database import get_banned_users, get_gbanned
-from config import BANNED_USERS
-
-
-async def init():
-    if (
-        not config.STRING1
-        and not config.STRING2
-        and not config.STRING3
-        and not config.STRING4
-        and not config.STRING5
-    ):
-        LOGGER(__name__).error("𝐒𝐭𝐫𝐢𝐧𝐠 𝐒𝐞𝐬𝐬𝐢𝐨𝐧 𝐍𝐨𝐭 𝐅𝐢𝐥𝐥𝐞𝐝, 𝐏𝐥𝐞𝐚𝐬𝐞 𝐅𝐢𝐥𝐥 𝐀 𝐏𝐲𝐫𝐨𝐠𝐫𝐚𝐦 𝐒𝐞𝐬𝐬𝐢𝐨𝐧")
-        exit()
-    await sudo()
+# Raise the file descriptor limit on Linux to avoid "[Errno 24] Too many open files"
+# when serving many groups concurrently (each audio stream + ffmpeg probe opens FDs).
+if sys.platform != "win32":
     try:
-        users = await get_gbanned()
-        for user_id in users:
-            BANNED_USERS.add(user_id)
-        users = await get_banned_users()
-        for user_id in users:
-            BANNED_USERS.add(user_id)
-    except:
+        import resource
+        _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        _target = min(65536, _hard)
+        if _soft < _target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (_target, _hard))
+    except Exception:
         pass
-    await app.start()
-    for all_module in ALL_MODULES:
-        importlib.import_module("PURVIMUSIC.plugins" + all_module)
-    LOGGER("PURVIMUSIC.plugins").info("𝐀𝐥𝐥 𝐅𝐞𝐚𝐭𝐮𝐫𝐞𝐬 𝐋𝐨𝐚𝐝𝐞𝐝 𝐁𝐚𝐛𝐲🥳...")
-    await userbot.start()
-    await PURVI.start()
+
+from Elevenyts import (tune, app, config, db,
+                   logger, stop, userbot, yt)
+from Elevenyts.plugins import all_modules
+
+
+# HTTP Server for Render health checks - FIXED FOR NO PORT ERROR
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler for Render health checks"""
+    
+    def do_GET(self):
+        """Handle GET requests"""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+    
+    def log_message(self, format, *args):
+        """Suppress log messages to keep console clean"""
+        pass
+
+
+def run_http_server():
+    """Run a simple HTTP server for Render health checks - PORT FIXED"""
+    # Render specific port binding - CRITICAL for no port error
+    port = int(os.environ.get("PORT", 8080))
+    server_address = ('0.0.0.0', port)  # Bind to 0.0.0.0 for Render detection
+    server = HTTPServer(server_address, HealthCheckHandler)
+    logger.info(f"🌐 HTTP health check server started on 0.0.0.0:{port}")
+    server.serve_forever()
+
+
+async def main():
     try:
-        await PURVI.stream_call("https://te.legra.ph/file/29f784eb49d230ab62e9e.mp4")
-    except NoActiveGroupCall:
-        LOGGER("PURVIMUSIC").error(
-            "𝗣𝗹𝗭 𝗦𝗧𝗔𝗥𝗧 𝗬𝗢𝗨𝗥 𝗟𝗢𝗚 𝗚𝗥𝗢𝗨𝗣 𝗩𝗢𝗜𝗖𝗘𝗖𝗛𝗔𝗧\𝗖𝗛𝗔𝗡𝗡𝗘𝗟\n\n𝗠𝗨𝗦𝗜𝗖 𝗕𝗢𝗧 𝗦𝗧𝗢𝗣........"
-        )
-        exit()
-    except:
-        pass
-    await PURVI.decorators()
-    LOGGER("PURVIMUSIC").info(
-        "╔═════ஜ۩۞۩ஜ════╗\n  ☠︎︎𝗠𝗔𝗗𝗘 𝗕𝗬 𝗔𝗟𝗣𝗛𝗔☠︎︎\n╚═════ஜ۩۞۩ஜ════╝"
-    )
-    await idle()
-    await app.stop()
-    await userbot.stop()
-    LOGGER("PURVIMUSIC").info("𝗦𝗧𝗢𝗣 𝗣𝗨𝗥𝗩𝗜 𝗠𝗨𝗦𝗜𝗖🎻 𝗕𝗢𝗧..")
+        # Step 1: Validate required environment variables
+        try:
+            config.check()
+        except SystemExit as e:
+            logger.error(str(e))
+            return
+
+        # Step 2: Start HTTP server in a separate thread (for Render) - STARTS FIRST
+        http_thread = threading.Thread(target=run_http_server, daemon=True)
+        http_thread.start()
+        logger.info("🌐 HTTP server thread started for Render health checks")
+        
+        # Small delay to ensure server binds port before bot starts
+        await asyncio.sleep(2)
+
+        # Step 3: Connect to MongoDB database
+        await db.connect()
+        
+        # Step 4: Start the main bot client
+        await app.boot()
+        
+        # Step 5: Start assistant/userbot clients (for joining voice chats)
+        await userbot.boot()
+        
+        # Step 6: Initialize voice call handler
+        await tune.boot()
+
+        # Step 7: Load all plugin modules (commands like /play, /pause, etc.)
+        for module in all_modules:
+            try:
+                importlib.import_module(f"Elevenyts.plugins.{module}")
+            except Exception as e:
+                logger.error(f"Failed to load plugin {module}: {e}", exc_info=True)
+        logger.info(f"🔌 Loaded {len(all_modules)} plugin modules.")
+
+        # Step 8: Load sudo users and blacklisted users from database
+        sudoers = await db.get_sudoers()
+        app.sudoers.update(sudoers)  # Add sudo users to set
+        app.sudo_filter.update(sudoers)  # Add sudo users to filter
+        app.bl_users.update(await db.get_blacklisted())  # Add blacklisted users to filter
+        logger.info(f"👑 Loaded {len(app.sudoers)} sudo users.")
+        logger.info("
+🎉 Bot started successfully! Ready to play music! 🎵
+")
+
+        # Step 9: Keep the bot running (press Ctrl+C to stop)
+        try:
+            await idle()
+        except KeyboardInterrupt:
+            logger.info("Received stop signal...")
+        except Exception as e:
+            logger.error(f"Error during idle: {e}", exc_info=True)
+        
+        # Step 10: Cleanup and shutdown when bot is stopped
+        await stop()
+    except Exception as e:
+        logger.error(f"Critical error in main: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(init())
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user (Ctrl+C)")
+    except SystemExit as e:
+        logger.error(f"Bot exited with system error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error caused bot to stop: {e}", exc_info=True)
+        # Don't raise - allow clean shutdown
+    finally:
+        # Ensure cleanup happens
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.stop()
+        except:
+            pass
