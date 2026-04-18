@@ -3,7 +3,7 @@ FROM python:3.11-slim-bookworm
 # Set working directory
 WORKDIR /app
 
-# Fix sources.list for stable apt + install deps without repo issues
+# Install system dependencies (git + ffmpeg + aria2)
 RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list && \
     echo "deb http://deb.debian.org/debian-security bookworm-security main" >> /etc/apt/sources.list && \
     echo "deb http://deb.debian.org/debian bookworm-updates main" >> /etc/apt/sources.list && \
@@ -12,15 +12,26 @@ RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.lis
         ffmpeg \
         aria2 \
         curl \
+        git \
         && apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Copy requirements first for better caching
+# Copy requirements first (Docker layer caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy bot code
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy all bot files
 COPY . .
 
-# Run bot (no web server needed for polling)
+# Expose port for Render (health check)
+EXPOSE 8080
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run bot
 CMD ["python3", "main.py"]
